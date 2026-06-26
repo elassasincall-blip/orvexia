@@ -17,34 +17,38 @@ exports.handler = async (event, context) => {
   try {
     const body = JSON.parse(event.body);
     const { type } = body;
-
-    if (type === 'cj_auth') {
-      const { email, password } = body;
-      const response = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-      const data = await response.json();
-      return { statusCode: 200, headers, body: JSON.stringify(data) };
-    }
+    const CJ_API_KEY = 'CJ5370593@api@fd4ead28cfd44fa58208ef6b02d97647';
 
     if (type === 'cj_search') {
-      const { accessToken, keyword, pageNum = 1, pageSize = 20 } = body;
+      const { keyword, pageNum = 1, pageSize = 20 } = body;
+
+      const authRes = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: CJ_API_KEY })
+      });
+      const authData = await authRes.json();
+
+      if (!authData.result || !authData.data || !authData.data.accessToken) {
+        return { statusCode: 200, headers, body: JSON.stringify({ result: false, message: authData.message || 'CJ auth failed', data: { list: [] } }) };
+      }
+
+      const token = authData.data.accessToken;
       const params = new URLSearchParams({
         productNameEn: keyword,
         pageNum: String(pageNum),
         pageSize: String(pageSize)
       });
-      const response = await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?${params}`, {
+
+      const searchRes = await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?${params}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-          'CJ-Access-Token': accessToken
+          'CJ-Access-Token': token
         }
       });
-      const data = await response.json();
-      return { statusCode: 200, headers, body: JSON.stringify(data) };
+      const searchData = await searchRes.json();
+      return { statusCode: 200, headers, body: JSON.stringify(searchData) };
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -63,7 +67,7 @@ exports.handler = async (event, context) => {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 1024,
-        system: system || 'Eres el asistente IA de ORVEXIA, una tienda de dropshipping. Ayuda a los clientes con productos, pedidos y dudas.',
+        system: system || 'Eres el asistente IA de ORVEXIA.',
         messages
       })
     });
@@ -79,3 +83,4 @@ exports.handler = async (event, context) => {
     };
   }
 };
+   
