@@ -1,9 +1,17 @@
-exports.handler = async (event, context) => {
+// =====================================================
+// ORVEXIA — Netlify Function: ai-proxy.js
+// Ubicación: netlify/functions/ai-proxy.js
+// Maneja: cj_auth, cj_search, cj_product_detail
+// =====================================================
+
+const CJ_BASE = 'https://developers.cjdropshipping.com/api2.0/v1';
+
+exports.handler = async function (event, context) {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
   };
 
   if (event.httpMethod === 'OPTIONS') {
@@ -11,76 +19,98 @@ exports.handler = async (event, context) => {
   }
 
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers, body: JSON.stringify({ error: 'Method not allowed' }) };
+    return { statusCode: 405, headers, body: JSON.stringify({ result: false, message: 'Method not allowed' }) };
+  }
+
+  let body;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return { statusCode: 400, headers, body: JSON.stringify({ result: false, message: 'Invalid JSON body' }) };
   }
 
   try {
-    const body = JSON.parse(event.body);
-    const { type } = body;
-    const CJ_API_KEY = 'CJ5370593@api@fd4ead28cfd44fa58208ef6b02d97647';
-
-    if (type === 'cj_search') {
-      const { keyword, pageNum = 1, pageSize = 20 } = body;
-
-      const authRes = await fetch('https://developers.cjdropshipping.com/api2.0/v1/authentication/getAccessToken', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: CJ_API_KEY })
-      });
-      const authData = await authRes.json();
-
-      if (!authData.result || !authData.data || !authData.data.accessToken) {
-        return { statusCode: 200, headers, body: JSON.stringify({ result: false, message: authData.message || 'CJ auth failed', data: { list: [] } }) };
-      }
-
-      const token = authData.data.accessToken;
-      const params = new URLSearchParams({
-        productNameEn: keyword,
-        pageNum: String(pageNum),
-        pageSize: String(pageSize)
-      });
-
-      const searchRes = await fetch(`https://developers.cjdropshipping.com/api2.0/v1/product/list?${params}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'CJ-Access-Token': token
-        }
-      });
-      const searchData = await searchRes.json();
-      return { statusCode: 200, headers, body: JSON.stringify(searchData) };
+    switch (body.type) {
+      case 'cj_auth':   return await handleCJAuth(body, headers);
+      case 'cj_search': return await handleCJSearch(body, headers);
+      case 'cj_product_detail': return await handleCJProductDetail(body, headers);
+      default:
+        return { statusCode: 400, headers, body: JSON.stringify({ result: false, message: `Tipo desconocido: ${body.type}` }) };
     }
-
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      return { statusCode: 500, headers, body: JSON.stringify({ error: 'API key not configured' }) };
-    }
-
-    const { messages, system } = body;
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
-        system: system || 'Eres el asistente IA de ORVEXIA.',
-        messages
-      })
-    });
-
-    const data = await response.json();
-    return { statusCode: 200, headers, body: JSON.stringify(data) };
-
-  } catch (error) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: 'Proxy error', details: error.message })
-    };
+  } catch (err) {
+    return { statusCode: 500, headers, body: JSON.stringify({ result: false, message: err.message }) };
   }
 };
-   
+
+async function handleCJAuth(body, headers) {
+  const { email, password } = body;
+  if (!email || !password)
+    return { statusCode: 400, headers, body: JSON.stringify({ result: false, message: 'Email y contraseña requeridos' }) };
+
+  const resp = await fetch(`${CJ_BASE}/authentication/getAccessToken`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await resp.json();
+
+  if (!data.result || !data.data?.accessToken)
+    return { statusCode: 401, headers, body: JSON.stringify({ result: false, message: data.message || 'Credenciales inválidas en CJ' }) };
+
+  return { statusCode: 200, headers, body: JSON.stringify({ result: true, data: { accessToken: data.data.accessToken, refreshToken: data.data.refreshToken || '', email } }) };
+}
+
+async function handleCJSearch(body, headers) {
+  const { token, keyword, pageNum = 1, pageSize = 20, categoryId = '' } = body;
+
+  if (!token)
+    return { statusCode: 401, headers, body: JSON.stringify({ result: false, message: 'Token CJ requerido. Reconecta tu cuenta.' }) };
+  if (!keyword?.trim())
+    return { statusCode: 400, headers, body: JSON.stringify({ result: false, message: 'Keyword requerida' }) };
+
+  const params = new URLSearchParams({ productNameEn: keyword.trim(), pageNum: String(pageNum), pageSize: String(pageSize) });
+  if (categoryId) params.append('categoryId', categoryId);
+
+  const resp = await fetch(`${CJ_BASE}/product/list?${params}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json', 'CJ-Access-Token': token },
+  });
+  const data = await resp.json();
+
+  if (!data.result && (resp.status === 401 || data.message?.toLowerCase().includes('token')))
+    return { statusCode: 401, headers, body: JSON.stringify({ result: false, message: 'Token CJ expirado. Reconecta tu cuenta CJ.' }) };
+
+  if (!data.result)
+    return { statusCode: 200, headers, body: JSON.stringify({ result: false, message: data.message || 'Error buscando en CJ', data: { list: [], total: 0 } }) };
+
+  const rawList = data.data?.list || data.data?.result || [];
+  const list = rawList.map(p => ({
+    pid: p.pid || p.productId || '',
+    productName: p.productNameEn || p.productName || 'Producto sin nombre',
+    productNameEn: p.productNameEn || p.productName || '',
+    productImage: p.productImage || p.productImageSet || '',
+    sellPrice: parseFloat(p.sellPrice || p.productPrice || 0),
+    categoryName: p.categoryName || p.category || 'General',
+    categoryId: p.categoryId || '',
+    variants: p.variants || [],
+  }));
+
+  return { statusCode: 200, headers, body: JSON.stringify({ result: true, data: { list, total: data.data?.total || list.length, pageNum, pageSize } }) };
+}
+
+async function handleCJProductDetail(body, headers) {
+  const { token, pid } = body;
+  if (!token) return { statusCode: 401, headers, body: JSON.stringify({ result: false, message: 'Token CJ requerido' }) };
+  if (!pid)   return { statusCode: 400, headers, body: JSON.stringify({ result: false, message: 'pid requerido' }) };
+
+  const resp = await fetch(`${CJ_BASE}/product/query?pid=${encodeURIComponent(pid)}`, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json', 'CJ-Access-Token': token },
+  });
+  const data = await resp.json();
+
+  if (!data.result)
+    return { statusCode: 200, headers, body: JSON.stringify({ result: false, message: data.message || 'Producto no encontrado' }) };
+
+  return { statusCode: 200, headers, body: JSON.stringify({ result: true, data: data.data }) };
+}
